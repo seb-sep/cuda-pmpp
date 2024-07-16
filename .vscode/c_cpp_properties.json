@@ -1,0 +1,17 @@
+{
+    "configurations": [
+        {
+            "name": "cuda",
+            "includePath": [
+                "${workspaceFolder}/**",
+                // "~/CUDA/cudaenv/lib/python3.12/site-packages/torch/include/csrc/api/include",
+                "~/CUDA/cudaenv/lib/python3.12/site-packages/torch/include/**"
+            ],
+            "intelliSenseMode": "linux-gcc-x64",
+            "compilerPath": "/usr/bin/gcc",
+            "cStandard": "c17",
+            "cppStandard": "gnu++17"
+        }
+    ],
+    "version": 4
+}
