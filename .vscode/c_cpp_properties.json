@@ -5,7 +5,8 @@
             "includePath": [
                 "${workspaceFolder}/**",
                 // "~/CUDA/cudaenv/lib/python3.12/site-packages/torch/include/csrc/api/include",
-                "~/CUDA/cudaenv/lib/python3.12/site-packages/torch/include/**"
+                "~/CUDA/cudaenv/lib/python3.12/site-packages/torch/include/**",
+                "~/miniconda3/include/python3.12"
             ],
             "intelliSenseMode": "linux-gcc-x64",
             "compilerPath": "/usr/bin/gcc",

@@ -1,7 +1,7 @@
 
 REMOTE_HOST=home-desktop
-REMOTE_DIR=~/CUDA/pmpp
-LOCAL_DIR=~/Code/CUDA/pmpp
+REMOTE_DIR=~/CUDA/pmpp/
+LOCAL_DIR=~/Code/CUDA/pmpp/
 
 RSYNC_OPTS=-avz --progress
 
