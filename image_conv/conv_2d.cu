@@ -2,13 +2,16 @@
 
 #include <torch/types.h>
 
+#include <stdio.h>
+
 const float PAD_VALUE = 0;
 const size_t TILE_WIDTH = 32;
 
 // You DON'T need to know the size of the mask beforehand, just allocate more than you will need
 // and only memcpy over what you actually use
-#define MAX_MASK_WIDTH 10
-__constant__ float MASK[MAX_MASK_WIDTH][MAX_MASK_WIDTH];
+// Make the mask linearized, so that you can easily copy into it whatever you need
+#define MAX_MASK_SIZE 64
+__constant__ float MASK[MAX_MASK_SIZE];
 
 __global__ void conv_2d_tiled(const float* N, float* P, 
                             int height, int width, int mask_width) {
@@ -33,22 +36,25 @@ __global__ void conv_2d_tiled(const float* N, float* P,
         float res = 0;
         // loop over the mask indices
         for (int i=0; i<mask_width; ++i) {
-            for (int j=0; j<mask_width; ++i) {
+            for (int j=0; j<mask_width; ++j) {
                 // check whether (i,j) is an inner or halo cell
+                // N_row and col are the indices that a given element of the mask is overlapping
+                float mask_factor = MASK[i*mask_width+j];
                 int N_row = row + i - halo_width;
                 int N_col = col + j - halo_width;
-                int tile_row = row - threadIdx.y;
-                int tile_col = col - threadIdx.x;
 
-                if (N_row >= tile_row && N_row < tile_row + blockDim.y
-                    && N_col >= tile_col && N_col < tile_col + blockDim.x) {
-                        res += N_s[threadIdx.y - halo_width + i][threadIdx.x - halo_width + j] * MASK[i][j];
+                int mask_row = threadIdx.y + i - halo_width;
+                int mask_col = threadIdx.x + j - halo_width;
+
+                if ((mask_row >= 0) && (mask_row < TILE_WIDTH)
+                    && (mask_col >= 0) && (mask_col < TILE_WIDTH)) {
+                        res += N_s[mask_row][mask_col] * mask_factor;
                 } else {
                     // only get a halo cell if it's in bounds, otherwise pad
-                    if (N_row >= 0 && N_row < height && N_col >= 0 && N_col < width) {
-                        res += N[N_row*width + N_col] * MASK[i][j];
+                    if ((N_row >= 0) && (N_row < height) && (N_col >= 0) && (N_col < width)) {
+                        res += N[N_row*width + N_col] * mask_factor;
                     } else {
-                        res += PAD_VALUE * MASK[i][j];
+                        res += PAD_VALUE * mask_factor;
                     }
                 }
             }
@@ -58,20 +64,32 @@ __global__ void conv_2d_tiled(const float* N, float* P,
     }
 }
 
-torch::Tensor conv_2d(torch::Tensor vector, torch::Tensor stencil) {
-    torch::Tensor res = torch::empty_like(vector);
-    int width = vector.numel();
-    int mask_width = stencil.numel();
-    assert(mask_width <= MAX_MASK_WIDTH);
+
+torch::Tensor conv_2d(torch::Tensor matrix, torch::Tensor mask) {
+    torch::Tensor res = torch::empty_like(matrix);
+
+    int height = matrix.size(0);
+    int width = matrix.size(1);
+    int mask_size = mask.numel();
+
+    assert(mask_size <= MAX_MASK_SIZE);
+    assert(mask.size(0) == mask.size(1));
 
     // load into the mask
-    cudaMemcpyToSymbol(MASK, (float*)stencil.const_data_ptr(), sizeof(float)*mask_width);
+    // since the underlying buffer is always 1d and is row-major, it's okay to naively copy buffer
+    cudaMemcpyToSymbol(MASK, (float*)mask.const_data_ptr(), sizeof(float)*mask_size);
 
-    auto n_tiles = width / TILE_WIDTH + (width%TILE_WIDTH);
-    conv_1d_tiled<<<n_tiles, TILE_SIZE>>>(
-        (float*)vector.const_data_ptr(), 
+    auto x_tiles = width / TILE_WIDTH + (width%TILE_WIDTH);
+    auto y_tiles = height / TILE_WIDTH + (height%TILE_WIDTH);
+
+    dim3 grid_dim(y_tiles, x_tiles);
+    dim3 tile_dim(TILE_WIDTH, TILE_WIDTH);
+    conv_2d_tiled<<<grid_dim, tile_dim>>>(
+        (float*)matrix.const_data_ptr(), 
         (float*)res.mutable_data_ptr(), 
-        mask_width, width);
+        height, width, mask.size(0));
+
+    cudaDeviceSynchronize();
     
     return res;
 }
