@@ -1,5 +1,11 @@
 {
     "files.associations": {
         "stdexcept": "cpp"
-    }
+    },
+    "[cpp]": {
+        "editor.formatOnSave": true
+    },
+    "[cuda]": {
+        "editor.formatOnSave": true
+    },
 }
