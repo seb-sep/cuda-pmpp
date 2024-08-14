@@ -31,7 +31,7 @@ void tiled_matmul_kernel(const T* A, const T* B, T* result,
         auto ax = TILE_WIDTH*p + threadIdx.x;
         auto ay = TILE_WIDTH*blockIdx.y + threadIdx.y;
         if ((ay < m) && (ax < k)) {
-            sma[threadIdx.y][threadIdx.x] = A[m*ay + ax];
+            sma[threadIdx.y][threadIdx.x] = A[k*ay + ax];
         } else {
             sma[threadIdx.y][threadIdx.x] = 0;
         }
@@ -40,7 +40,7 @@ void tiled_matmul_kernel(const T* A, const T* B, T* result,
         auto bx = TILE_WIDTH*blockIdx.x + threadIdx.x;
         auto by = TILE_WIDTH*p + threadIdx.y;
         if ((by < k) && (bx < n)) {
-            smb[threadIdx.y][threadIdx.x] = B[k*by + bx];
+            smb[threadIdx.y][threadIdx.x] = B[n*by + bx];
         } else {
             smb[threadIdx.y][threadIdx.x] = 0;
         }
@@ -57,7 +57,7 @@ void tiled_matmul_kernel(const T* A, const T* B, T* result,
             for (auto i=0; i<TILE_WIDTH; ++i)
                 dot += sma[threadIdx.y][i]*smb[i][threadIdx.x];
             // remember, result matrix is mxn
-            result[m*ay + bx] += dot;
+            result[n*ay + bx] += dot;
         }
         
         __syncthreads();

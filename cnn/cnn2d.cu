@@ -3,11 +3,6 @@
 #include <stdio.h>
 
 __global__
-void cnn_conv2d(const float* X, float* Y, const float* W, int M, int C, int H, int K) {
-
-}
-
-__global__
 void unroll_kernel(const float* X, float* X_unroll, int C, int H, int W, int K) {
     // each thread gets kxk input elems
     // total threads C*Hout*Wout
@@ -66,6 +61,68 @@ void unroll_kernel(const float* X, float* X_unroll, int C, int H, int W, int K) 
     __syncthreads();
 }
 
+const size_t TILE_WIDTH = 8;
+
+// Remember that PyTorch tensors are row-major
+__global__ 
+void tiled_matmul_kernel(const float* A, const float* B, float* result, 
+                        size_t m, size_t k, size_t n) {
+                        
+    // blockDim is useless here since we know it's tile width
+    // threadIdx is the index within the tile
+    // blockIdx is the index of the whole tile
+    // gridDim is the dimension of tiles across the matrix
+    
+    size_t k_tiles = k / TILE_WIDTH + (k % TILE_WIDTH);
+
+    // shared memory tiles
+    __shared__ float sma[TILE_WIDTH][TILE_WIDTH];
+    __shared__ float smb[TILE_WIDTH][TILE_WIDTH];
+
+    // loop across phases of tiling
+    // tile across the inner dim
+    for (auto p=0; p<k_tiles; ++p) {
+        // remember, tiling moves across row of a and col of b
+        // each thread loads in the corresponding index of the tile
+        
+        // is thread index within matrix a? if so, load in value
+        auto ax = TILE_WIDTH*p + threadIdx.x;
+        auto ay = TILE_WIDTH*blockIdx.y + threadIdx.y;
+        if ((ay < m) && (ax < k)) {
+            sma[threadIdx.y][threadIdx.x] = A[k*ay + ax];
+        } else {
+            sma[threadIdx.y][threadIdx.x] = 0;
+        }
+        // load into shared matrix b
+        // column of b
+        auto bx = TILE_WIDTH*blockIdx.x + threadIdx.x;
+        auto by = TILE_WIDTH*p + threadIdx.y;
+        if ((by < k) && (bx < n)) {
+            smb[threadIdx.y][threadIdx.x] = B[n*by + bx];
+        } else {
+            smb[threadIdx.y][threadIdx.x] = 0;
+        }
+
+        // need to wait for all threads to load before you actually multiply
+        __syncthreads();
+
+        // find your spot in the result matrix
+        // this is the y of a and the x of b (mxn)
+        // this should not be dependent on the phase
+        if ((ay < m) && (bx < n)) {
+            // dot product a row from shared memory
+            float dot = 0;
+            for (auto i=0; i<TILE_WIDTH; ++i)
+                dot += sma[threadIdx.y][i]*smb[i][threadIdx.x];
+            // remember, result matrix is mxn
+            // multiply by the width of the row to properly linearlize access
+            result[n*ay + bx] += dot;
+        }
+        
+        __syncthreads();
+    }
+}
+
 
 torch::Tensor unroll(torch::Tensor X, int K) {
     // launch kernel with flattened grid of C*h_out*w_out threads
@@ -78,17 +135,53 @@ torch::Tensor unroll(torch::Tensor X, int K) {
 
     const auto dtype = X.dtype();
     auto options = torch::TensorOptions().device(X.device()).dtype(dtype);
-    torch::Tensor X_unroll = torch::zeros({C*K*K, H_out*W_out}, options);
+    torch::Tensor X_unroll = torch::empty({C*K*K, H_out*W_out}, options);
 
     int n_threads = C * H_out * W_out;
     int n_blocks = n_threads / CUDA_MAX_THREADS_PER_BLOCK + 1;
-
-    std::cout << n_threads << " threads, " << n_blocks << " blocks, " << "\n";
-    
-
 
     unroll_kernel<<<n_blocks, n_threads>>>(
         (float*)X.const_data_ptr(), (float*)X_unroll.mutable_data_ptr(), C, H, W, K);
 
     return X_unroll;
 }
+
+// Note that K is not actually implicit here; the number of convolutions present 
+// in your weight matrix depends on the size of K
+torch::Tensor conv2d(torch::Tensor X, torch::Tensor W_unroll, int K) {
+
+    // unroll input matrix
+    torch::Tensor X_unroll = unroll(X, K);
+
+    std::cout <<  W_unroll << "\n" << X_unroll;
+
+    // # of output channels
+    auto m = W_unroll.size(0);
+    // # of elements to multiply and add in each convolution
+    auto k = W_unroll.size(1); 
+    // # values in each channel (# of convolutions)
+    auto n = X_unroll.size(1);
+
+    const auto dtype = X.dtype();
+    auto options = torch::TensorOptions().device(X.device()).dtype(dtype);
+
+    // because the kernel accumulates in the result, must initialize with zeros
+    torch::Tensor res = torch::zeros({m, n}, options);
+
+    // from this point, a totally generic matmul
+    dim3 block_dim(TILE_WIDTH, TILE_WIDTH);
+    size_t m_tiles = m / TILE_WIDTH + (m % TILE_WIDTH != 0);
+    size_t n_tiles = n / TILE_WIDTH + (n % TILE_WIDTH != 0);
+    dim3 grid_dim(n_tiles, m_tiles);
+
+    tiled_matmul_kernel<<<grid_dim, block_dim>>>(
+        (float*)W_unroll.const_data_ptr(), (float*)X_unroll.const_data_ptr(), 
+        (float*)res.mutable_data_ptr(), m, k, n);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) 
+        printf("Error: %s\n", cudaGetErrorString(err));
+
+    return res;
+}
+
